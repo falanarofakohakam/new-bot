@@ -46,6 +46,3 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
-
-# Ignore secrets
-config.py
