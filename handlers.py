@@ -141,10 +141,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def run_scan_action(query, context, action):
     """
     Fungsi yang dieksekusi saat tombol strategi scan ditekan.
-    ALUR BARU YANG LEBIH EFISIEN:
-    1. Cari sinyal LIVE pada semua (50) koin terlebih dahulu.
-    2. Untuk sinyal yang ditemukan, jalankan backtest 3 hari untuk me-ranking.
-    3. Tampilkan maksimal 5 sinyal terbaik yang sudah ter-ranking.
+    ALUR BARU: Langsung mencari dan menampilkan sinyal live tanpa backtest/ranking.
     """
     strategy_name = action.replace('run_scan_', '')
     strategy_instance = AVAILABLE_STRATEGIES.get(strategy_name)
@@ -152,87 +149,66 @@ async def run_scan_action(query, context, action):
         await query.message.reply_text("Strategi tidak ditemukan.")
         return
 
-    # --- LANGKAH 1: CARI SEMUA SINYAL LIVE ---
+    # --- PERUBAHAN: Pesan awal yang lebih sederhana ---
     await query.edit_message_text(
         f"🔍 *Mencari sinyal live* untuk strategi `{strategy_name}` pada {config.TOP_N_SYMBOLS} pair teratas...",
         parse_mode='Markdown'
     )
     
+    # === KODE LAMA YANG DINONAKTIFKAN (DIJADIKAN COMMENT) ===
+    # # --- LANGKAH 1: Peringkat Koin via Backtest (DINONAKTIFKAN) ---
+    # try:
+    #     top_5_data = await asyncio.to_thread(
+    #         features.find_top_performers,
+    #         strategy_instance=strategy_instance,
+    #         days=3,
+    #         top_n=5
+    #     )
+    # except Exception as e:
+    #     logger.error(f"Gagal saat mencari top performers: {e}")
+    #     await query.message.reply_text(f"Terjadi error saat mencari koin terbaik: {e}")
+    #     return
+    # if not top_5_data:
+    #     await query.message.reply_text("Tidak dapat menemukan koin dengan kinerja yang cukup baik dalam 3 hari terakhir.")
+    #     await query.message.reply_text("Pilih fitur selanjutnya:", reply_markup=build_main_menu())
+    #     return
+    # # --- LANGKAH 2: Tampilkan Hasil Peringkat Backtest (DINONAKTIFKAN) ---
+    # top_5_symbols_from_ranking = [result['symbol'] for result in top_5_data]
+    # ranking_text = f"✅ *Top 5 Koin Performa Terbaik (Backtest 3 Hari)*\n..."
+    # await query.message.reply_text(ranking_text, parse_mode='Markdown')
+    # === AKHIR KODE LAMA ===
+
+    # --- LOGIKA BARU: LANGSUNG SCAN SEMUA SIMBOL ---
     symbols_to_scan = utils.get_top_symbols(context)
-    live_signals = []
+    hits = []
     primary_timeframe = getattr(strategy_instance, 'TIMEFRAME', '15m')
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_symbol = {
             executor.submit(strategy_instance.check_signal, sym, utils.fetch_klines(sym, primary_timeframe, 200)): sym
-            for sym in symbols_to_scan
+            for sym in symbols_to_scan # <-- Scan semua simbol, bukan hanya top 5
         }
         for future in concurrent.futures.as_completed(future_to_symbol):
             try:
                 result = future.result()
-                if result:
-                    # Lampirkan instance strategi untuk digunakan di langkah selanjutnya
-                    result['strategy_instance'] = strategy_instance
-                    live_signals.append(result)
+                if result: hits.append(result)
             except Exception as e:
-                logger.error(f"Error saat mencari sinyal live di Scan: {e}")
+                logger.error(f"Error saat scan live simbol: {e}")
 
-    if not live_signals:
-        await query.edit_message_text(f"Tidak ada sinyal live yang ditemukan saat ini untuk strategi `{strategy_name}`.", parse_mode='Markdown')
-        # await query.message.reply_text("Pilih fitur selanjutnya:", reply_markup=build_main_menu())
-        return
-
-    # --- LANGKAH 2: RANKING SINYAL YANG DITEMUKAN ---
-    await query.message.reply_text(
-        f"✅ Ditemukan *{len(live_signals)}* potensi sinyal live. "
-        f"Memulai proses ranking berdasarkan performa backtest 3 hari...",
-        parse_mode='Markdown'
-    )
+    # --- Tampilkan Hasil Akhir (Sinyal Live) ---
+    if not hits:
+        await query.message.reply_text(f"Tidak ada sinyal live yang ditemukan saat ini untuk strategi `{strategy_name}`.", parse_mode='Markdown')
+    else:
+        text = f"🎯 *Sinyal Live Ditemukan (Strategi: `{strategy_name}`)*\n\n"
+        for h in hits:
+            signal_emoji = "🟢" if h['signal'] == 'LONG' else "🔴"
+            rr_ratio = h.get('risk_reward_ratio', 'N/A')
+            text += (f"*{h['symbol']}* {signal_emoji} *{h['signal']}*\n"
+                     f"📄 *Alasan*: _{h['reason']}_\n➡️ *Entry*: `{h['entry']:.4f}`\n"
+                     f"🛡️ *SL*: `{h['stop_loss']:.4f}`\n🎯 *TP*: `{h['take_profit']:.4f}` (R:R {rr_ratio})\n\n")
+        await query.message.reply_text(text, parse_mode='Markdown')
     
-    ranked_signals = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.BACKTEST_WORKERS) as executor:
-        future_to_signal = {
-            executor.submit(features.run_backtest, signal['strategy_instance'], signal['symbol'], days=3): signal
-            for signal in live_signals
-        }
-        for future in concurrent.futures.as_completed(future_to_signal):
-            original_signal = future_to_signal[future]
-            try:
-                backtest_result = future.result()
-                if backtest_result and backtest_result['total_trades'] > 0:
-                    original_signal.update(backtest_result)
-                    ranked_signals.append(original_signal)
-            except Exception as e:
-                logger.error(f"Error saat backtest untuk ranking: {e}")
-
-    if not ranked_signals:
-        await query.message.reply_text("Tidak ada sinyal yang lolos kualifikasi backtest untuk ditampilkan.")
-        # await query.message.reply_text("Pilih fitur selanjutnya:", reply_markup=build_main_menu())
-        return
-
-    # --- LANGKAH 3: TAMPILKAN HASIL TERATAS ---
-    sorted_signals = sorted(
-        ranked_signals,
-        key=lambda x: (x.get('profit_factor', 0), x.get('win_rate', 0)),
-        reverse=True
-    )
-    top_5_signals = sorted_signals[:5]
-
-    final_text = f"🎯 *Top {len(top_5_signals)} Sinyal Live Terbaik (Strategi: `{strategy_name}`)*\n"
-    final_text += "_Diurutkan berdasarkan performa backtest 3 hari terakhir._\n\n"
-    for i, h in enumerate(top_5_signals):
-        signal_emoji = "🟢" if h['signal'] == 'LONG' else "🔴"
-        rr_ratio = h.get('risk_reward_ratio', 'N/A')
-        
-        final_text += (
-            f"*{i+1}. {h['symbol']}* {signal_emoji} *{h['signal']}*\n"
-            f"📄 *Alasan*: _{h['reason']}_\n"
-            f"➡️ *Entry*: `{h['entry']:.4f}` | *SL*: `{h['stop_loss']:.4f}` | *TP*: `{h['take_profit']:.4f}` (R:R {rr_ratio})\n"
-            f"🚀 *Kinerja 3 Hari*: WR *{h['win_rate']:.1f}%* | PF *{h.get('profit_factor', 0):.2f}* ({h['total_trades']} trade)\n"
-            f"-----------------------------------\n"
-        )
-    
-    await query.message.reply_text(final_text, parse_mode='Markdown')
+    # Tampilkan kembali menu utama setelah semua proses selesai
     await query.message.reply_text("Pilih fitur selanjutnya:", reply_markup=build_main_menu())
 
 async def prompt_for_backtest_params(query, context, action):
@@ -333,7 +309,7 @@ async def backtest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_long = results.get('long_wins', 0) + results.get('long_losses', 0)
         total_short = results.get('short_wins', 0) + results.get('short_losses', 0)
 
-        text = (f"**Hasil Backtest: {strategy_instance.name}**\n"
+        text = (f"**Hasil Backtest: `{strategy_instance.name}`**\n"
                 f"Periode: {results['period_days']} hari, {results['symbol']}\n\n"
                 f"Total Trade: {results['total_trades']}\n"
                 f"✅ Menang: {results['wins']}\n"

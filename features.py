@@ -177,14 +177,10 @@ def run_multi_backtest(strategy_instance, days: int) -> dict:
 
 async def continuous_scan_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Job Auto Scan yang disempurnakan.
-    ALUR BARU:
-    1. Cari sinyal LIVE dari SEMUA strategi.
-    2. Jika ada, jalankan backtest 3 hari untuk SETIAP sinyal yang ditemukan.
-    3. Ranking sinyal berdasarkan performa backtest.
-    4. Kirim notifikasi tunggal berisi maksimal 5 sinyal terbaik.
+    Job Auto Scan.
+    ALUR BARU: Langsung mengirim notifikasi untuk setiap sinyal live yang ditemukan.
     """
-    logger.info("Auto Scan Job v4.5: Memulai...")
+    logger.info("Auto Scan Job: Memulai...")
     
     # --- LANGKAH 1: TEMUKAN SEMUA SINYAL LIVE DARI SEMUA STRATEGI ---
     logger.info("Auto Scan: Mencari sinyal live...")
@@ -216,74 +212,56 @@ async def continuous_scan_job(context: ContextTypes.DEFAULT_TYPE):
     if not all_live_signals:
         logger.info("Auto Scan Job: Tidak ada sinyal live yang ditemukan dari semua strategi."); return
     
-    logger.info(f"Auto Scan: Ditemukan {len(all_live_signals)} sinyal live. Memulai proses ranking...")
+    logger.info(f"Auto Scan: Ditemukan {len(all_live_signals)} sinyal live. Mengirim notifikasi...")
 
-    # --- LANGKAH 2: RANKING SINYAL DENGAN BACKTEST 3 HARI ---
-    ranked_signals = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.BACKTEST_WORKERS) as executor:
-        future_to_signal = {
-            executor.submit(run_backtest, signal['strategy_instance'], signal['symbol'], days=3): signal
-            for signal in all_live_signals
-        }
-        for future in concurrent.futures.as_completed(future_to_signal):
-            original_signal = future_to_signal[future]
-            try:
-                backtest_result = future.result()
-                if backtest_result and backtest_result['total_trades'] > 0:
-                    original_signal.update(backtest_result)
-                    ranked_signals.append(original_signal)
-            except Exception as e:
-                logger.error(f"Error saat menjalankan backtest untuk ranking: {e}")
+    # === KODE LAMA YANG DINONAKTIFKAN (DIJADIKAN COMMENT) ===
+    # # --- LANGKAH 2: RANKING SINYAL DENGAN BACKTEST 3 HARI (DINONAKTIFKAN) ---
+    # ranked_signals = []
+    # with concurrent.futures.ThreadPoolExecutor(max_workers=config.BACKTEST_WORKERS) as executor:
+    #     future_to_signal = { ... }
+    #     for future in concurrent.futures.as_completed(future_to_signal):
+    #         ...
+    # # --- LANGKAH 3: SORTIR DAN PILIH 5 TERATAS (DINONAKTIFKAN) ---
+    # sorted_signals = sorted(...)
+    # top_5_signals = sorted_signals[:5]
+    # === AKHIR KODE LAMA ===
 
-    if not ranked_signals:
-        logger.info("Auto Scan Job: Tidak ada sinyal yang lolos kualifikasi backtest."); return
-        
-    # --- LANGKAH 3: SORTIR DAN PILIH 5 TERATAS ---
-    sorted_signals = sorted(
-        ranked_signals, 
-        key=lambda x: (x.get('profit_factor', 0), x.get('win_rate', 0)), 
-        reverse=True
-    )
-    top_5_signals = sorted_signals[:5]
-
-    # --- LANGKAH 4: KIRIM NOTIFIKASI TUNGGAL ---
+    # --- LOGIKA BARU: KIRIM SEMUA SINYAL YANG DITEMUKAN ---
     now = datetime.now()
     last_signals = context.bot_data.setdefault('last_signal_time', {})
     
-    top_signal_key = top_5_signals[0]['symbol'] + top_5_signals[0]['strategy_instance'].name
-    if last_signals.get(top_signal_key) and (now - last_signals.get(top_signal_key) < timedelta(hours=3)):
-        logger.info(f"Auto Scan Job: Sinyal teratas {top_signal_key} sudah dikirim belum lama ini. Dilewati.")
-        return
-
-    message = "🔥 *Top Sinyal Auto Scan (Terbaik dari Semua Strategi)* 🔥\n\n"
-    message += "_Sinyal-sinyal berikut adalah sinyal LIVE yang diurutkan berdasarkan performa backtest 3 hari terakhir._\n\n"
-
-    for i, h in enumerate(top_5_signals):
+    for h in all_live_signals: # <-- Loop melalui semua sinyal, bukan top 5
         strategy_instance = h['strategy_instance']
+        symbol = h['symbol']
+        
+        # Cek anti-spam
+        signal_key = symbol + strategy_instance.name
+        if last_signals.get(signal_key) and (now - last_signals.get(signal_key) < timedelta(hours=3)):
+            logger.info(f"Auto Scan: Sinyal untuk {signal_key} sudah dikirim belum lama ini. Dilewati.")
+            continue
+
+        # Buat dan kirim pesan notifikasi untuk setiap sinyal
         signal_emoji = "🟢" if h['signal'] == 'LONG' else "🔴"
         rr_ratio = h.get('risk_reward_ratio', 'N/A')
-        
-        # <<<--- PERUBAHAN DI SINI ---
-        # Menggunakan backtick ` ` untuk menampilkan alasan agar aman dari error parsing
         reason = f"[{strategy_instance.name.upper()}] {h['reason']}"
         
-        message += (
-            f"*{i+1}. {h['symbol']}* {signal_emoji} *{h['signal']}*\n"
-            f"📄 *Alasan*: `{reason}`\n"  # <-- Alasan sekarang menggunakan format code
+        message = (
+            f"🔥 *Sinyal Baru (Auto Scan)!*\n\n"
+            f"*{h['symbol']}* {signal_emoji} *{h['signal']}*\n"
+            f"📄 *Alasan*: `{reason}`\n"
             f"➡️ *Entry*: `{h['entry']:.4f}` | *SL*: `{h['stop_loss']:.4f}` | *TP*: `{h['take_profit']:.4f}` (R:R {rr_ratio})\n"
-            f"🚀 *Kinerja 3 Hari*: WR *{h['win_rate']:.1f}%* | PF *{h.get('profit_factor', 0):.2f}* ({h['total_trades']} trade)\n"
-            f"-----------------------------------\n"
         )
-        # <<<--- AKHIR PERUBAHAN ---
 
-    for chat_id in context.bot_data.get('autoscan_chats', set()):
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Gagal mengirim autoscan ke {chat_id}: {e}")
-    
-    last_signals[top_signal_key] = now
-    logger.info("Auto Scan Job: Notifikasi top 5 sinyal berhasil dikirim.")
+        for chat_id in context.bot_data.get('autoscan_chats', set()):
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Gagal mengirim autoscan ke {chat_id}: {e}")
+        
+        # Perbarui waktu sinyal terakhir untuk anti-spam
+        last_signals[signal_key] = now
+
+    logger.info(f"Auto Scan Job: {len(all_live_signals)} notifikasi sinyal telah dikirim.")
 
 async def forwardtest_job(context: ContextTypes.DEFAULT_TYPE):
     """Job untuk paper trading, sekarang juga menggunakan semua strategi."""
