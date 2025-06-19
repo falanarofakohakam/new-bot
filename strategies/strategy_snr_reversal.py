@@ -1,3 +1,5 @@
+# strategies/strategy_snr_reversal.py
+
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -20,8 +22,8 @@ class SnRReversalStrategy(BaseStrategy):
 
     # Parameter Manajemen Risiko
     ATR_LENGTH_LTF = 14
-    SL_ATR_BUFFER = 1 
-    RISK_REWARD_RATIO = 3
+    SL_ATR_BUFFER = 1.5 
+    RISK_REWARD_RATIO = 2.0
 
     # Parameter Filter Konfirmasi
     USE_RSI_FILTER = True
